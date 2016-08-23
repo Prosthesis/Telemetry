@@ -1,0 +1,40 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+  <head>
+	<title>Prosthesis Telemetry</title>
+	<meta name="viewport" content="width=400px" />
+	
+	<script src="socket.io/socket.io.js"></script>
+	<link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+	<input type="range" id= "inputSlider" min="0" max="255" value="50" step="1" oninput="showValue(this.value)" />
+	<input type="range" id= "inputSlider2" min="0" max="255" value="50" step="1" oninput="showValue(this.value)" />
+	
+	<br><br><span id="outputText">50</span>
+	
+	<script type="text/javascript">
+		var socket = io.connect();
+		
+		socket.on('led', function (data) {
+			console.log("data.sensor = " + data.sensor)
+			if(data.sensor == "T")
+			{
+				document.getElementById("inputSlider").value = data.value;
+				document.getElementById("outputText").innerHTML = data.value;
+			}
+			else if(data.sensor == "P")
+			{
+				document.getElementById("inputSlider2").value = data.value;
+			}
+			
+		});
+		
+		function showValue(newValue)
+		{
+			document.getElementById("outputText").innerHTML=newValue;
+			socket.emit('led', { value: newValue });
+		}
+	</script>
+  </body>
+</html>
