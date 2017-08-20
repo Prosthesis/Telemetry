@@ -26,13 +26,17 @@ import socket
 import argparse
 import struct
 import errno
-import collections # mna - circular buffer use
+import collections # circular buffer use
 import json
+import threading
+
+
+
 
 
 class CANSocket(object):
-  FORMAT = "<IB3x8s" # byte order  - < = little endian | I = unsigned int (can id) | B = unsigned char | 3x = padding 3 | 8s = 8-byte string
-  FD_FORMAT = "<IB3x64s" # byte order  - < = little endian | I = unsigned int (can id) | B = unsigned char | 3x = padding 3 | 64s = 64-byte string
+  FORMAT = "<IB3x8s" # byte order  : < = little endian | I = unsigned int (can id) | B = unsigned char | 3x = padding 3 | 8s = 8-byte string
+  FD_FORMAT = "<IB3x64s" # byte order : < = little endian | I = unsigned int (can id) | B = unsigned char | 3x = padding 3 | 64s = 64-byte string
   CAN_RAW_FD_FRAMES = 5
 
   def __init__(self, interface=None):
@@ -44,20 +48,17 @@ class CANSocket(object):
     self.sock.bind((interface,))
     self.sock.setsockopt(socket.SOL_CAN_RAW, self.CAN_RAW_FD_FRAMES, 1)
 
-  #def send(self, cob_id, data, flags=0):
-  #  cob_id = cob_id | flags
-  #  can_pkt = struct.pack(self.FORMAT, cob_id, len(data), data)
-  #  self.sock.send(can_pkt)
 
+  # unpack can msg
   def recv(self, flags=0):
-    can_pkt = self.sock.recv(72) #mna - read call will block for 72 seconds
+    can_pkt = self.sock.recv(72) # read call will block for 72 seconds
 
     if len(can_pkt) == 16:
       cob_id, length, data = struct.unpack(self.FORMAT, can_pkt) 
     else:
       cob_id, length, data = struct.unpack(self.FD_FORMAT, can_pkt)
 
-    # mna - Begin
+  
     # our CAN messages have only three values we care about - 
     # the type of msg, the value of the msg, timestamp of message
     # our can msg type is specified by the cob_id
@@ -70,104 +71,86 @@ class CANSocket(object):
     # Value | 4 bytes (signed) - 44332211
 
     timestamp, value = struct.unpack('<Ii', data)
-    # mna - End
+
+    cob_id &= socket.CAN_EFF_MASK # If sending a CAN packet with an extended (29 bit) CAN-ID, the “Identifier extension bit” needs to be set
+    return (cob_id, data[:length], timestamp, value) # trim to the actual length received based on the length field from the packet
+
+# ------------- Outside of class -------------
 
 
-    cob_id &= socket.CAN_EFF_MASK # mna - If sending a CAN packet with an extended (29 bit) CAN-ID, the “Identifier extension bit” needs to be set
-    return (cob_id, data[:length], timestamp, value) # mna - trim to the actual length received based on the length field from the packet
-
-    
 
 
-# ------------ Outside of class -------------
+
+
+
+
+# ------------- Read & Parse CAN messages related functions BEGIN -------------
 
 def format_data(data):
     return ''.join([hex(byte)[2:] for byte in data])
 
 
-#def generate_bytes(hex_string):
-#    if len(hex_string) % 2 != 0:
-#      hex_string = "0" + hex_string
-#
-#    int_array = []
-#    for i in range(0, len(hex_string), 2):
-#        int_array.append(int(hex_string[i:i+2], 16))
-#
-#    return bytes(int_array)
-
-
-#def send_cmd(args):
-#    try:
-#      s = CANSocket(args.interface)
-#    except OSError as e:
-#      sys.stderr.write('Could not send on interface {0}\n'.format(args.interface))
-#      sys.exit(e.errno)
-#
-#    try:
-#      cob_id = int(args.cob_id, 16)
-#    except ValueError:
-#      sys.stderr.write('Invalid cob-id {0}\n'.format(args.cob_id))
-#      sys.exit(errno.EINVAL)
-#
-#    s.send(cob_id, generate_bytes(args.body), socket.CAN_EFF_FLAG if args.extended_id else 0)
-
-
-
-# mna CAN-related functions BEGIN
-def listen_cmd(args):
+# read can msg as binary and store in circular buffer as json message
+def listen(interface):
     try:
-      s = CANSocket(args.interface)
+      s = CANSocket(interface)
     except OSError as e:
-      sys.stderr.write('Could not listen on interface {0}\n'.format(args.interface))
+      sys.stderr.write('Could not listen on interface {0}\n'.format(interface))
       sys.exit(e.errno)
 
-    print('Listening on {0}'.format(args.interface))
+    print('Listening on {0}'.format(interface))
 
     while True:
-        cob_id, data, timestamp, value = s.recv() #mna
-        print('%s %03x#%s' % (args.interface, cob_id, format_data(data)))
+        cob_id, data, timestamp, value = s.recv()
+        print('%s %03x#%s' % (interface, cob_id, format_data(data)))
         print('timestamp = %s | value = %s' % (timestamp, value))
         insertCanMsg(cob_id, timestamp, value)
 
 
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers()
 
-    #send_parser = subparsers.add_parser('send', help='send a CAN packet')
-    #send_parser.add_argument('interface', type=str, help='interface name (e.g. vcan0)')
-    #send_parser.add_argument('cob_id', type=str, help='hexadecimal COB-ID (e.g. 10a)')
-    #send_parser.add_argument('body', type=str, nargs='?', default='',
-    #  help='hexadecimal msg body up to 8 bytes long (e.g. 00af0142fe)')
-    #send_parser.add_argument('-e', '--extended-id', action='store_true', default=False,
-    #  help='use extended (29 bit) COB-ID')
-    #send_parser.set_defaults(func=send_cmd)
+# ------------- Circular Buffer-related functions BEGIN -------------
 
-    listen_parser = subparsers.add_parser('listen', help='listen for and print CAN packets')
-    listen_parser.add_argument('interface', type=str, help='interface name (e.g. vcan0)')
-    listen_parser.set_defaults(func=listen_cmd)
+circularBuffer = collections.deque(maxlen = 1000) # - TODO what's a good length here?
+lock = threading.Lock()
 
-    return parser.parse_args()
-
-# mna CAN-related functions END
-
-
-# mna Circular Buffer-related functions BEGIN
-circularBuffer = collections.deque(maxlen = 100) # - mna what's a good length here?
-
-#read CAN message and store in circular buffer
-def insertCanMsg(cob_id, timestamp, value): #mna
+# package can message id, timestamp, and value as json
+# and store in circular buffer
+def insertCanMsg(cob_id, timestamp, value):
     jsonCanMsg = jsonifyCanMsg(cob_id, timestamp, value)
-    circularBuffer.append(jsonCanMsg) # mna insert to the right of the circ buf. when the buf is full items on the left will drop off to make room for new items coming in on the right
+    
+    lock.acquire()
+    try:
+      circularBuffer.append(jsonCanMsg) # insert to the right of the circ buf. when the buf is full items on the left will drop off to make room for new items coming in on the right
+    finally:
+      lock.release()
 
-def serveCanMsg(): #mna
-    jsonCanMsg = circularBuffer.popleft() # mna pull off the oldest msg first
-    #serve on websockets
 
 
-# mna - check
-def jsonifyCanMsg(cob_id, timestamp, value): #mna
+def serveCanMsg(): 
+    result = createEmptyJsonCanMsg()
+    if len(circularBuffer) <= 0:
+      return result 
+    
+
+    lock.acquire()
+    try:
+      result = circularBuffer.popleft() # pull off the oldest msg first
+    finally:
+      lock.release()
+
+    return result
+
+def createEmptyJsonCanMsg():
+    jsonresult = { -1 : 
+                    { "timestamp" : -1,
+                      "value" : -1
+                     } 
+                  } 
+    return json.dumps(jsonresult)
+                  
+
+def jsonifyCanMsg(cob_id, timestamp, value):
     jsonresult = { cob_id : 
                     { "timestamp" : timestamp,
                       "value" : value
@@ -177,11 +160,13 @@ def jsonifyCanMsg(cob_id, timestamp, value): #mna
     return json.dumps(jsonresult)
 
     
-# mna Circular Buffer-related functions END
+
+
+
+# ------------- Main function BEGIN -------------
 
 def main():
-    args = parse_args()
-    args.func(args)
+    threading.Thread(target=listen, kwargs={"interface":"can0"}).start() #hardcode interface to be can0
 
 
 if __name__ == '__main__':
